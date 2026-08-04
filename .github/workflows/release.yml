@@ -1,0 +1,191 @@
+name: Release
+
+# Every push to main that touches code produces a release, tagged with the next patch
+# version. The first release is v0.0.1.
+#
+# Documentation-only changes are excluded on purpose: a README edit does not need a new set
+# of binaries, and tagging one makes the release history useless for answering "what
+# actually changed in the tool".
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "install.sh"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which component to increment"
+        required: false
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+# Two pushes in quick succession must not both compute "the next version" from the same
+# starting point and then race to create the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # The gate. A commit that cannot build, vet or test must never become a tag, because a
+  # tag is the one thing in this pipeline that cannot be quietly undone.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Tags are the version source of truth, so the full history is required. A
+          # shallow clone silently sees no tags and would restart numbering at v0.0.1
+          # on every run.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute the next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump || 'patch' }}
+        run: |
+          set -euo pipefail
+
+          # Sort by version, not lexically: v0.0.10 must beat v0.0.9.
+          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)"
+
+          if [ -z "$latest" ]; then
+            next="v0.0.1"
+            echo "No existing tag; starting at $next"
+          else
+            IFS='.' read -r major minor patch <<EOF
+          ${latest#v}
+          EOF
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              *)     patch=$((patch + 1)) ;;
+            esac
+            next="v${major}.${minor}.${patch}"
+            echo "Latest tag $latest; next is $next"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+            echo "::error::Tag $next already exists. Refusing to overwrite a published tag."
+            exit 1
+          fi
+
+          echo "version=$next"        >> "$GITHUB_OUTPUT"
+          echo "bare=${next#v}"       >> "$GITHUB_OUTPUT"
+          echo "previous=$latest"     >> "$GITHUB_OUTPUT"
+
+      - name: Build release archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BARE: ${{ steps.version.outputs.bare }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Reproducibility: strip the symbol table and the local build path, and stamp the
+          # version through one linker flag shared by both binaries.
+          ldflags="-s -w"
+          ldflags="$ldflags -X github.com/dpalfery/terragraph/internal/version.Version=$VERSION"
+          ldflags="$ldflags -X github.com/dpalfery/terragraph/internal/version.Commit=$GITHUB_SHA"
+
+          while read -r goos goarch; do
+            [ -z "$goos" ] && continue
+            stage="$(mktemp -d)"
+            ext=""
+            [ "$goos" = "windows" ] && ext=".exe"
+
+            for cmd in terragraph terragraph-mcp; do
+              GOOS="$goos" GOARCH="$goarch" go build \
+                -trimpath -ldflags "$ldflags" \
+                -o "$stage/${cmd}${ext}" "./cmd/$cmd"
+            done
+            # LICENSE is included when the repository has one; its absence is not a
+            # release failure. Written as an `if` rather than `[ -f L ] && cp`, because
+            # under `set -e` a failing test in an && list is a portability trap.
+            cp README.md "$stage/"
+            if [ -f LICENSE ]; then cp LICENSE "$stage/"; fi
+
+            base="terragraph_${BARE}_${goos}_${goarch}"
+            if [ "$goos" = "windows" ]; then
+              (cd "$stage" && zip -qr "$OLDPWD/dist/${base}.zip" .)
+            else
+              tar -czf "dist/${base}.tar.gz" -C "$stage" .
+            fi
+            rm -rf "$stage"
+          done <<'TARGETS'
+          darwin arm64
+          darwin amd64
+          linux amd64
+          linux arm64
+          windows amd64
+          TARGETS
+
+          (cd dist && sha256sum ./* > checksums.txt)
+          ls -la dist
+
+      - name: Smoke-test the linux binary
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tar -xzf "dist/terragraph_${{ steps.version.outputs.bare }}_linux_amd64.tar.gz" -C "$tmp"
+          # The version must come back stamped, not "dev" — a release that cannot identify
+          # itself makes every future bug report ambiguous.
+          got="$("$tmp/terragraph" version)"
+          echo "$got"
+          case "$got" in
+            *"${{ steps.version.outputs.version }}"*) ;;
+            *) echo "::error::binary reports '$got', expected ${{ steps.version.outputs.version }}"; exit 1 ;;
+          esac
+          "$tmp/terragraph" status --repo testdata/repo > /dev/null
+
+      - name: Tag the release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          set -euo pipefail
+
+          notes_flag="--generate-notes"
+          if [ -n "$PREVIOUS" ]; then
+            notes_flag="--generate-notes --notes-start-tag $PREVIOUS"
+          fi
+
+          # shellcheck disable=SC2086
+          gh release create "$VERSION" dist/* \
+            --title "$VERSION" \
+            $notes_flag \
+            --notes "Install:
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+          \`\`\`
+
+          Verify downloads against \`checksums.txt\`."

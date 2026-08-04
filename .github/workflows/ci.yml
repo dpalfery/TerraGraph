@@ -1,0 +1,96 @@
+name: CI
+
+# Runs on every pull request and every push to main. The release workflow depends on this
+# passing first, so a broken commit cannot become a tagged release.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          # Read the version from go.mod so the toolchain cannot drift from the source.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "go.mod or go.sum is not tidy; run 'go mod tidy' and commit the result."
+            git --no-pager diff go.mod go.sum
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -coverprofile=cover.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=cover.out | tail -1
+
+      - name: Build both binaries
+        run: |
+          go build ./cmd/terragraph
+          go build ./cmd/terragraph-mcp
+
+  # Cross-compilation is verified on every change rather than discovered at release time,
+  # when the tag has already been pushed and the failure is far more awkward to undo.
+  cross-compile:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build every release target
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          while read -r goos goarch; do
+            echo "==> $goos/$goarch"
+            GOOS="$goos" GOARCH="$goarch" go build -o /dev/null ./cmd/terragraph
+            GOOS="$goos" GOARCH="$goarch" go build -o /dev/null ./cmd/terragraph-mcp
+          done <<'TARGETS'
+          darwin arm64
+          darwin amd64
+          linux amd64
+          linux arm64
+          windows amd64
+          TARGETS
+
+  shellcheck:
+    name: shellcheck install.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Lint the installer
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck install.sh
