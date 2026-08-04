@@ -1,0 +1,66 @@
+name: Wrong or missing result
+description: A tool returned the wrong answer, missed something, or found something that is not there
+title: "[Result]: "
+labels: ["bug", "correctness"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template exists because correctness bugs here have a particular shape, and
+        the useful details are not the ones a generic bug report asks for.
+
+        TerraGraph's central claim is that a reference is a resolved HCL traversal —
+        so an address written in a comment or inside a quoted string is deliberately
+        **not** a reference. If a "missing" result is one of those, that is working as
+        intended. If it is not, this is a real defect and worth reporting carefully.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of wrong?
+      options:
+        - "Missing: something real was not reported"
+        - "Spurious: something was reported that is not a real reference"
+        - "Misattributed: right finding, wrong file, line, stack or module"
+        - "Ranking: the right answer was returned but buried"
+        - "Counts: instance counts or replacement info look wrong"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      placeholder: terragraph impact var.environment --depth 3 --repo ./infra
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Minimal Terraform that reproduces it
+      description: |
+        The smallest configuration showing the problem. This matters more than anything
+        else in the report — most correctness bugs are an HCL shape the parser handles
+        wrongly, and the shape is the bug.
+      render: hcl
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should it have said, and why?
+      description: Name the specific edge, node or count, and where in the configuration it comes from.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What it said
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `terragraph version`
+    validations:
+      required: true

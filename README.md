@@ -223,6 +223,16 @@ than invented one document at a time.
 kyber-weave docs validate .
 ```
 
+## Contributing
+
+`main` is the release branch and `develop` is the integration branch — open pull requests
+against `develop`. Every merge to `main` that touches code publishes a release with the
+patch version incremented automatically.
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — workflow, what CI enforces, testing conventions
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [SECURITY.md](SECURITY.md) — report privately, never as a public issue
+
 ## Development
 
 ```bash
@@ -234,3 +244,12 @@ roots sharing a local module, a registry module pinned at two versions, an orpha
 and an unconsumed output, a `moved` block, an aliased provider, a `dynamic` block, and a
 resource address written in both a comment and a string literal — the last being the case
 that must produce **no** edge.
+
+`testdata/overlay/` and `testdata/expanded/` are real `terraform show -json` output, not
+hand-written JSON — see [CONTRIBUTING.md](CONTRIBUTING.md#testing-conventions) for why that
+distinction matters.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). Third-party dependencies and their licences are listed in
+[NOTICE](NOTICE); note that `hashicorp/hcl/v2` is MPL-2.0 rather than permissive.

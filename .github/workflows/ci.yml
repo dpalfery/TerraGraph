@@ -1,11 +1,15 @@
 name: CI
 
-# Runs on every pull request and every push to main. The release workflow depends on this
-# passing first, so a broken commit cannot become a tagged release.
+# Runs on every pull request and every push to main or develop. The release workflow calls
+# this workflow and depends on it passing, so a broken commit cannot become a tagged release.
+#
+# The three job names here — test, cross-compile, shellcheck install.sh — are the required
+# status checks on both protected branches. Renaming a job silently un-protects the branch,
+# because a required check that never reports is simply never enforced.
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
   workflow_call:
 
 permissions:

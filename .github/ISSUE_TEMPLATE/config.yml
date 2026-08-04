@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/dpalfery/TerraGraph/security/advisories/new
+    about: Report security issues privately via GitHub Security Advisories. Please do not file a public issue.
+  - name: Discussions
+    url: https://github.com/dpalfery/TerraGraph/discussions
+    about: Ask questions and share ideas.

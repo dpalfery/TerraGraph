@@ -1,0 +1,58 @@
+TerraGraph
+==========
+
+Copyright (c) 2026 David Palfery
+Licensed under the MIT Licence. See LICENSE.
+
+TerraGraph is original work. It takes design ideas from Kyber-Weave's DocGraph
+(https://github.com/dpalfery/kyber-weave) — the immutable in-memory snapshot,
+ranking on declared identity, the relevance floor, the character budget — but no
+code: Kyber-Weave is C# and TerraGraph is Go. Nothing is vendored from it.
+
+
+Third-party components
+----------------------
+
+TerraGraph links the following modules. Each remains under its own licence.
+
+  github.com/hashicorp/hcl/v2                MPL-2.0
+  github.com/agext/levenshtein               Apache-2.0
+  github.com/apparentlymart/go-textseg/v15   Apache-2.0
+  github.com/google/jsonschema-go            MIT
+  github.com/mitchellh/go-wordwrap           MIT
+  github.com/modelcontextprotocol/go-sdk     MIT
+  github.com/segmentio/asm                   MIT
+  github.com/segmentio/encoding              MIT
+  github.com/yosida95/uritemplate/v3         BSD-3-Clause
+  github.com/zclconf/go-cty                  MIT
+  golang.org/x/oauth2                        BSD-3-Clause
+  golang.org/x/sync                          BSD-3-Clause
+  golang.org/x/sys                           BSD-3-Clause
+  golang.org/x/text                          BSD-3-Clause
+  golang.org/x/time                          BSD-3-Clause
+
+
+A note on HCL and MPL-2.0
+-------------------------
+
+github.com/hashicorp/hcl/v2 is under the Mozilla Public License 2.0, not MIT.
+It is called out separately because it is the one dependency whose licence is
+weak copyleft rather than permissive, and because it is load-bearing — HCL is
+what makes TerraGraph a parser rather than a regular expression.
+
+MPL-2.0 reciprocity is per-file: it obliges anyone who modifies HCL's own source
+files to publish those modifications under MPL-2.0. TerraGraph does not modify
+HCL; it imports it as a dependency. Combining an MPL-2.0 library with MIT code in
+a larger work is expressly permitted (MPL-2.0 §3.3), so TerraGraph's own source
+remains MIT and the distributed binaries carry both licences.
+
+This note is a summary written for orientation, not legal advice. If your
+organisation's policy restricts copyleft dependencies, the obligation attaches to
+HCL and you should read MPL-2.0 yourself:
+https://www.mozilla.org/en-US/MPL/2.0/
+
+
+Regenerating this list
+----------------------
+
+  go list -deps -f '{{with .Module}}{{.Path}}{{end}}' ./... | sort -u

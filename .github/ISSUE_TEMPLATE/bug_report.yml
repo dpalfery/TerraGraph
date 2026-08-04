@@ -1,0 +1,85 @@
+name: Bug report
+description: Report unexpected behaviour or a defect
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. For security issues, use [Security Advisories](https://github.com/dpalfery/TerraGraph/security/advisories/new) instead.
+
+        If the problem is a wrong or missing answer from a tool, please paste the
+        output of `terragraph status --repo <your repo>` below. It reports unresolved
+        references, parse errors and overlay coverage, which explain most surprising
+        results.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The exact command, and the smallest Terraform configuration that triggers it.
+        A few `.tf` blocks are far more useful than a description of them.
+      placeholder: |
+        1. terragraph refs aws_s3_bucket.logs --repo ./infra
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Paste the output. Redact anything sensitive.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `terragraph version`
+      placeholder: terragraph v0.0.1 (7b73f595e7a8) darwin/arm64
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: terragraph status output
+      description: Optional, but it usually contains the answer.
+      render: text
+    validations:
+      required: false
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - install.sh
+        - Release archive
+        - Built from source
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: overlay
+    attributes:
+      label: Was a plan or state overlay loaded?
+      description: "`terragraph status` reports this under `plan overlay:`."
+      options:
+        - "No overlay (static HCL only)"
+        - "Plan overlay"
+        - "State overlay"
+        - "Not sure"
+    validations:
+      required: false
