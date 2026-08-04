@@ -165,11 +165,7 @@ func printNotes(changes []mcpinit.Change, root string) {
 		if c.Target.Note == "" || c.Action == mcpinit.ActionManual {
 			continue
 		}
-		note := c.Target.Note
-		if strings.Contains(note, "%s") {
-			note = fmt.Sprintf(note, root)
-		}
-		fmt.Printf("\n  %s:\n    %s\n", c.Target.Display, note)
+		fmt.Printf("\n  %s:\n    %s\n", c.Target.Display, c.Target.NoteFor(root))
 	}
 
 	if wrote {

@@ -54,12 +54,30 @@ type Target struct {
 	// Detect are paths whose presence suggests this tool is in use.
 	Detect []string
 
-	// Note is a caveat printed after a successful write, when there is one that actually
-	// changes whether the configuration works.
+	// Note is a caveat about whether the configuration actually works. A %s in it takes the
+	// project root; render it with NoteFor rather than fmt.Sprintf.
 	Note string
 
 	// Docs is where to read more when the note is not enough.
 	Docs string
+}
+
+// NoteFor renders the target's caveat for one project root.
+//
+// It is not a plain Sprintf, because a note that quotes a path is quoting it *into a config
+// file* — the Codex one puts it in a TOML table header — and a Windows path is mostly
+// backslashes, which TOML reads as escapes. Interpolated raw, C:\Users starts an invalid \U
+// escape and the block the user was told to paste verbatim does not parse: a snippet that
+// exists to fix a silent failure, failing silently. So the value is quoted for the format of
+// the file it is going into, and Note templates leave the quotes off.
+func (t Target) NoteFor(root string) string {
+	if !strings.Contains(t.Note, "%s") {
+		return t.Note
+	}
+	if t.Format == FormatTOML {
+		return fmt.Sprintf(t.Note, tomlString(root))
+	}
+	return fmt.Sprintf(t.Note, jsonString(root))
 }
 
 // Targets is every supported tool, in a stable order.
@@ -153,9 +171,11 @@ func Targets() []Target {
 			// This one is not a nicety. Codex ignores project-local config entirely for a
 			// project it does not trust, so without this the file is written, looks
 			// correct, and does nothing.
+			// The %s is quoted by NoteFor, not by this template — the path is a TOML string
+			// literal and has to be escaped as one.
 			Note: "Codex ignores project-local config for untrusted projects. Mark this project\n" +
 				"    trusted in ~/.codex/config.toml, or the server will never load:\n" +
-				"      [projects.\"%s\"]\n" +
+				"      [projects.%s]\n" +
 				"      trust_level = \"trusted\"",
 		},
 	}

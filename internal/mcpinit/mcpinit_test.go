@@ -110,6 +110,53 @@ func TestTargetShapesMatchVendorDocs(t *testing.T) {
 	})
 }
 
+// TestNoteForEscapesPathsIntoTheirFormat covers the snippet a user is told to paste verbatim.
+// The Codex note puts the project root inside a TOML table header, so on Windows the path is
+// mostly backslashes — and "C:\Users" interpolated raw begins an invalid \U escape, leaving a
+// block that does not parse. A note that exists to fix a silent failure must not have one.
+func TestNoteForEscapesPathsIntoTheirFormat(t *testing.T) {
+	var codex Target
+	for _, x := range Targets() {
+		if x.ID == "codex" {
+			codex = x
+		}
+	}
+	if !strings.Contains(codex.Note, "%s") {
+		t.Fatal("the Codex note no longer interpolates the project root; this test is stale")
+	}
+
+	note := codex.NoteFor(`C:\Users\dave\proj`)
+	if !strings.Contains(note, `[projects."C:\\Users\\dave\\proj"]`) {
+		t.Errorf("backslashes were not escaped for TOML:\n%s", note)
+	}
+	// Every backslash must be part of an escaped pair. An odd run leaves one acting as an
+	// escape — "\U" being the one Windows paths hit constantly.
+	for i := 0; i < len(note); i++ {
+		if note[i] != '\\' {
+			continue
+		}
+		run := 0
+		for ; i < len(note) && note[i] == '\\'; i++ {
+			run++
+		}
+		if run%2 != 0 {
+			t.Errorf("an unescaped backslash survived into the snippet:\n%s", note)
+		}
+	}
+
+	// The quoting belongs to NoteFor, so a template carrying its own quotes would double them.
+	if strings.Contains(codex.Note, `"%s"`) {
+		t.Error("the note template quotes the path itself; NoteFor already does")
+	}
+
+	// A note without a placeholder is passed through untouched.
+	for _, x := range Targets() {
+		if !strings.Contains(x.Note, "%s") && x.NoteFor("/anything") != x.Note {
+			t.Errorf("%s: a note with no placeholder was rewritten", x.ID)
+		}
+	}
+}
+
 func TestLookupAcceptsAliases(t *testing.T) {
 	for _, name := range []string{"claude", "claude-code", "CLAUDE", " cursor ", "kilocode", "vscode"} {
 		if _, ok := Lookup(name); !ok {
@@ -223,6 +270,200 @@ args = ["@playwright/mcp@latest"]
 	if _, changed, _ := mergeTOML(replaced, "terragraph", "/opt/terragraph-mcp", []string{"--repo", "."}); changed {
 		t.Error("TOML merge is not idempotent")
 	}
+}
+
+// TestMergeTOMLFindsEverySpellingOfTheHeader is the regression that matters most here. TOML
+// spells one table several ways, and a scanner that recognises only its own spelling misses a
+// section that is already there and appends a second copy — which is not untidy but fatal,
+// since duplicate tables are a parse error and Codex then loads none of the file.
+func TestMergeTOMLFindsEverySpellingOfTheHeader(t *testing.T) {
+	spellings := []string{
+		"[mcp_servers.terragraph] # the one we already added",
+		"[mcp_servers.terragraph]\t# tab before the comment",
+		"[ mcp_servers . terragraph ]",
+		`[mcp_servers."terragraph"]`,
+		"[mcp_servers.'terragraph']",
+	}
+
+	for _, header := range spellings {
+		t.Run(header, func(t *testing.T) {
+			base := []byte(header + "\ncommand = \"stale\"\n")
+
+			out, changed, err := mergeTOML(base, "terragraph", "/opt/terragraph-mcp", nil)
+			if err != nil || !changed {
+				t.Fatalf("changed=%v err=%v", changed, err)
+			}
+			if n := countTOMLSections(string(out), "terragraph"); n != 1 {
+				t.Fatalf("appended a duplicate section (%d total):\n%s", n, out)
+			}
+			if !strings.Contains(string(out), `command = "/opt/terragraph-mcp"`) {
+				t.Errorf("the command was not updated:\n%s", out)
+			}
+			if strings.Contains(string(out), `command = "stale"`) {
+				t.Errorf("the old command survived:\n%s", out)
+			}
+			if !strings.Contains(string(out), header) {
+				t.Errorf("the header the user wrote was rewritten:\n%s", out)
+			}
+			if _, changed, _ := mergeTOML(out, "terragraph", "/opt/terragraph-mcp", nil); changed {
+				t.Error("not idempotent")
+			}
+		})
+	}
+}
+
+// TestMergeTOMLCollapsesExistingDuplicates repairs a file an earlier build could produce. Two
+// sections with one key cannot be parsed, so leaving them in place would keep the config
+// broken through exactly the command a user runs to fix it.
+func TestMergeTOMLCollapsesExistingDuplicates(t *testing.T) {
+	base := []byte(`[mcp_servers.terragraph]
+command = "first"
+
+[mcp_servers.playwright]
+command = "npx"
+
+[mcp_servers.terragraph]
+command = "second"
+`)
+
+	out, changed, err := mergeTOML(base, "terragraph", "/opt/terragraph-mcp", nil)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if n := countTOMLSections(string(out), "terragraph"); n != 1 {
+		t.Fatalf("expected the duplicates to collapse to one, got %d:\n%s", n, out)
+	}
+	if strings.Contains(string(out), `"first"`) || strings.Contains(string(out), `"second"`) {
+		t.Errorf("a stale command survived:\n%s", out)
+	}
+	if !strings.Contains(string(out), "[mcp_servers.playwright]") {
+		t.Errorf("someone else's server was dropped:\n%s", out)
+	}
+}
+
+// TestMergeTOMLKeepsWhatItDoesNotOwn covers the other half of the section scan: our span has
+// to reach past a sub-table of our own server, and everything in it that TerraGraph does not
+// write is the user's to keep.
+func TestMergeTOMLKeepsWhatItDoesNotOwn(t *testing.T) {
+	base := []byte(`[mcp_servers.terragraph]
+command = "stale"
+args = [
+  "--repo",
+  ".",
+]
+startup_timeout_sec = 30
+
+[mcp_servers.terragraph.env]
+TERRAGRAPH_LOG = "debug"
+
+[mcp_servers.playwright]
+command = "npx"
+`)
+
+	out, changed, err := mergeTOML(base, "terragraph", "/opt/terragraph-mcp", []string{"--repo", "."})
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	s := string(out)
+
+	for _, want := range []string{
+		"startup_timeout_sec = 30",               // a foreign key inside our own section
+		"[mcp_servers.terragraph.env]",           // a sub-table configuring our server
+		`TERRAGRAPH_LOG = "debug"`,               // and its contents
+		"[mcp_servers.playwright]",               // the section our span must stop before
+		`command = "/opt/terragraph-mcp"` + "\n", // what we actually came to write
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("lost %q:\n%s", want, s)
+		}
+	}
+	// The stale multi-line array must go whole. A leftover element or closing bracket left
+	// standing on its own line is a syntax error, not just clutter.
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed == "]" || trimmed == `"--repo",` {
+			t.Errorf("the old multi-line args array left %q behind:\n%s", trimmed, s)
+		}
+	}
+	if n := countTOMLSections(s, "terragraph"); n != 1 {
+		t.Errorf("duplicate sections: %d\n%s", n, s)
+	}
+	if _, changed, _ := mergeTOML(out, "terragraph", "/opt/terragraph-mcp", []string{"--repo", "."}); changed {
+		t.Error("not idempotent")
+	}
+}
+
+// TestMergeTOMLIgnoresLookalikeSections guards the opposite failure: matching too eagerly and
+// overwriting a table that is not ours.
+func TestMergeTOMLIgnoresLookalikeSections(t *testing.T) {
+	base := []byte(`[mcp_servers.terragraph_old]
+command = "keep me"
+
+[other.terragraph]
+command = "keep me too"
+
+[mcp_servers.terragraph-staging]
+command = "and me"
+`)
+
+	out, changed, err := mergeTOML(base, "terragraph", "/opt/terragraph-mcp", nil)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	s := string(out)
+	if strings.Count(s, "keep me") != 2 || !strings.Contains(s, "and me") {
+		t.Errorf("a section that only looks like ours was overwritten:\n%s", s)
+	}
+	if n := countTOMLSections(s, "terragraph"); n != 1 {
+		t.Errorf("expected our section to be appended once, got %d:\n%s", n, s)
+	}
+}
+
+// TestParseTOMLTableHeader pins the parser directly, including the case that rules out the
+// tempting one-line fix: splitting on "#" to drop comments corrupts a quoted key containing
+// one, and a "]" inside a quoted key is data rather than the end of the header.
+func TestParseTOMLTableHeader(t *testing.T) {
+	tests := []struct {
+		line string
+		want []string
+	}{
+		{"[mcp_servers.terragraph]", []string{"mcp_servers", "terragraph"}},
+		{"  [mcp_servers.terragraph]  # trailing", []string{"mcp_servers", "terragraph"}},
+		{"[ mcp_servers . terragraph ]", []string{"mcp_servers", "terragraph"}},
+		{`[mcp_servers."terragraph"]`, []string{"mcp_servers", "terragraph"}},
+		{`[mcp_servers.'a#b']`, []string{"mcp_servers", "a#b"}},
+		{`[mcp_servers.'a]b']`, []string{"mcp_servers", "a]b"}},
+		{`[mcp_servers."a.b"]`, []string{"mcp_servers", "a.b"}},
+		{"[[mcp_servers.terragraph]]", []string{"mcp_servers", "terragraph"}},
+		{"command = \"x\"", nil},
+		{"# [mcp_servers.terragraph]", nil},
+		{"[mcp_servers.terragraph", nil},
+		{"[mcp_servers.terragraph] trailing junk", nil},
+	}
+
+	for _, tc := range tests {
+		got, ok := parseTOMLTableHeader(tc.line)
+		if tc.want == nil {
+			if ok {
+				t.Errorf("%q: parsed as a header %v, want not-a-header", tc.line, got)
+			}
+			continue
+		}
+		if !ok || !tomlKeyEqual(got, tc.want) {
+			t.Errorf("%q: got %v ok=%v, want %v", tc.line, got, ok, tc.want)
+		}
+	}
+}
+
+// countTOMLSections counts real [mcp_servers.<name>] headers, in any spelling, so a test
+// cannot be fooled by the substring search that hid this bug in the first place.
+func countTOMLSections(s, name string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if key, ok := parseTOMLTableHeader(line); ok && tomlKeyEqual(key, []string{"mcp_servers", name}) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestTOMLQuotingHandlesWindowsPaths matters because a backslash is an escape inside a TOML
