@@ -16,21 +16,27 @@ import (
 
 	"github.com/dpalfery/terragraph/internal/index"
 	"github.com/dpalfery/terragraph/internal/render"
+	"github.com/dpalfery/terragraph/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const version = "0.1.0"
-
 func main() {
 	repo := flag.String("repo", ".", "repository to index")
+	plan := flag.String("plan", "", "plan/state overlay: <root>=<path> pairs, or a bare path")
+	showVersion := flag.Bool("version", false, "print the build identity and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("terragraph-mcp", version.String())
+		return
+	}
 
 	if err := index.StatFS(*repo); err != nil {
 		fmt.Fprintf(os.Stderr, "terragraph-mcp: cannot read %s: %v\n", *repo, err)
 		os.Exit(1)
 	}
 
-	host := index.NewHost(*repo)
+	host := index.NewHost(*repo).WithPlan(*plan)
 
 	// Build once at startup so a broken repository fails loudly here rather than inside
 	// the first tool call, where the agent would read it as "no results".
@@ -39,11 +45,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A malformed --plan silently degrades to no overlay, and an agent would then read
+	// "static HCL only" as the truth about the repository rather than about a typo.
+	if perr := host.ExplicitPlanError(); perr != nil {
+		fmt.Fprintf(os.Stderr, "terragraph-mcp: --plan ignored: %v\n", perr)
+	}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:        "terragraph",
 		Title:       "TerraGraph",
 		Description: "An in-memory graph of this repository's Terraform configuration.",
-		Version:     version,
+		Version:     version.Version,
 	}, nil)
 
 	registerTools(server, host)
@@ -69,20 +81,40 @@ type exploreIn struct {
 }
 
 type addressIn struct {
-	Address string `json:"address" jsonschema:"A Terraform address (aws_s3_bucket.logs, var.environment, module.vpc), a bare local name, or a resource type."`
+	Address    string `json:"address" jsonschema:"A Terraform address (aws_s3_bucket.logs, var.environment, module.vpc), a bare local name, or a resource type."`
+	CharBudget int    `json:"charBudget,omitempty" jsonschema:"Total characters of output (500-120000). Defaults to 4000."`
 }
 
 type impactIn struct {
-	Address   string `json:"address" jsonschema:"The address to trace from."`
-	Direction string `json:"direction,omitempty" jsonschema:"'dependents' (default) for what a change would affect, or 'dependencies' for what this needs."`
-	Depth     int    `json:"depth,omitempty" jsonschema:"How many hops to walk. Defaults to 3."`
+	Address    string `json:"address" jsonschema:"The address to trace from."`
+	Direction  string `json:"direction,omitempty" jsonschema:"'dependents' (default) for what a change would affect, or 'dependencies' for what this needs."`
+	Depth      int    `json:"depth,omitempty" jsonschema:"How many hops to walk. Defaults to 3."`
+	CharBudget int    `json:"charBudget,omitempty" jsonschema:"Total characters of output (500-120000). Defaults to 4000."`
 }
 
 type modulesIn struct {
-	Filter string `json:"filter,omitempty" jsonschema:"Substring of a module source or call name. Omit to inventory every module."`
+	Filter     string `json:"filter,omitempty" jsonschema:"Substring of a module source or call name. Omit to inventory every module."`
+	CharBudget int    `json:"charBudget,omitempty" jsonschema:"Total characters of output (500-120000). Defaults to 4000."`
+}
+
+type budgetIn struct {
+	CharBudget int `json:"charBudget,omitempty" jsonschema:"Total characters of output (500-120000). Defaults to 4000."`
 }
 
 type emptyIn struct{}
+
+// orBudget applies a default so every tool is bounded even when the caller omits it.
+//
+// The relationship tools default lower than retrieval. Retrieval returns source and needs
+// room; a list whose header already states its true total loses much less to truncation,
+// and a benchmark on a 29-stack repository showed the inherited 12000 made those tools
+// cost more than the grep they replace.
+func orBudget(v, def int) int {
+	if v == 0 {
+		return def
+	}
+	return v
+}
 
 func registerTools(s *mcp.Server, host *index.Host) {
 	current := func() (*index.Index, error) { return host.Current() }
@@ -135,7 +167,7 @@ picking one.`,
 		if err != nil {
 			return nil, nil, err
 		}
-		return text(render.ForAddress(ix, in.Address))
+		return text(render.ForAddress(ix, in.Address, orBudget(in.CharBudget, index.DefaultListBudget)))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -145,11 +177,15 @@ picking one.`,
 'dependents' answers "what breaks if I change this". 'dependencies' answers "what does
 this need to exist".
 
-Important limit, stated in every result: this is what is CONNECTED, not what a plan would
-replace. Static configuration knows which expressions read which addresses; only
-'terraform plan' knows which changes force replacement. Blocks using count or for_each are
-named, because their real instance count is unknown without a plan, which makes the set a
-lower bound.`,
+Every result states how much it knows, and there are three cases.
+
+With a plan overlay loaded it names exactly what will be DESTROYED AND RECREATED, and
+resolves count/for_each into real instance counts. With only a state overlay the instance
+counts are real but replacement is unknowable. With neither, the answer is what is
+CONNECTED — a lower bound, because expanding blocks could be any number of instances — and
+it says so rather than implying more precision than it has.
+
+Check terra_status to see which case you are in before relying on the answer.`,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in impactIn) (*mcp.CallToolResult, any, error) {
 		ix, err := current()
 		if err != nil {
@@ -163,7 +199,7 @@ lower bound.`,
 		if depth == 0 {
 			depth = 3
 		}
-		return text(render.Impact(ix, in.Address, dir, depth))
+		return text(render.Impact(ix, in.Address, dir, depth, orBudget(in.CharBudget, index.DefaultListBudget)))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -181,7 +217,7 @@ finding rather than the background.`,
 		if err != nil {
 			return nil, nil, err
 		}
-		return text(render.Modules(ix, in.Filter))
+		return text(render.Modules(ix, in.Filter, orBudget(in.CharBudget, index.DefaultListBudget)))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -195,12 +231,12 @@ and it is reported as such — that is the shape a linter and a grep both miss.
 
 Root module outputs are excluded by design: they are the stack's public surface, so nothing
 inside the repository is meant to consume them.`,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in emptyIn) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in budgetIn) (*mcp.CallToolResult, any, error) {
 		ix, err := current()
 		if err != nil {
 			return nil, nil, err
 		}
-		return text(render.Orphans(ix))
+		return text(render.Orphans(ix, orBudget(in.CharBudget, index.DefaultListBudget)))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -209,9 +245,13 @@ inside the repository is meant to consume them.`,
 
 Reports node and edge counts, the root modules discovered, how many references could not be
 resolved (they point into remote modules this index cannot see), any parse errors, and
-whether a plan overlay is loaded. Check this when an answer looks thinner than the
-repository should support — the cause is usually unresolved references or a parse error,
-both of which are reported here rather than silently narrowing every other result.`,
+which stacks have a plan or state overlay.
+
+Check this when an answer looks thinner than the repository should support — the cause is
+usually unresolved references or a parse error, both reported here rather than silently
+narrowing every other result. Check it before trusting terra_impact about replacement: a
+repository with an overlay on some stacks and not others is the dangerous case, so the
+stacks WITHOUT one are named explicitly.`,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in emptyIn) (*mcp.CallToolResult, any, error) {
 		ix, err := current()
 		if err != nil {

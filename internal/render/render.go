@@ -13,11 +13,56 @@ import (
 
 	"github.com/dpalfery/terragraph/internal/graph"
 	"github.com/dpalfery/terragraph/internal/index"
+	"github.com/dpalfery/terragraph/internal/overlay"
 )
 
 // refCap bounds how many references are listed for one node. A variable with two hundred
 // consumers should say so, not print them.
 const refCap = 40
+
+// budget bounds an answer's size and remembers what it had to drop.
+//
+// Every tool needs one, not just retrieval. A benchmark against a 29-stack repository found
+// terra_for_address returning 3,814 tokens where grep cost 1,438: `var.remote_state_bucket`
+// is declared once per stack, and printing every declaration with every reference produced
+// an answer more expensive than the thing it replaced. A tool whose whole purpose is to
+// spend fewer tokens than grep must be bounded by construction, not by the shape of the
+// repository it happens to be pointed at.
+type budget struct {
+	limit   int
+	spent   int
+	dropped int
+}
+
+func newBudget(limit int) *budget {
+	if limit <= 0 {
+		limit = index.DefaultCharBudget
+	}
+	return &budget{limit: limit}
+}
+
+// allow reserves room for a chunk, or records that it was dropped.
+func (bd *budget) allow(cost int) bool {
+	if bd.spent+cost > bd.limit {
+		bd.dropped++
+		return false
+	}
+	bd.spent += cost
+	return true
+}
+
+// exhausted is true once anything has been dropped, so an emitter can stop scanning.
+func (bd *budget) exhausted() bool { return bd.dropped > 0 }
+
+// note writes the standard "what was left out" line. Naming the omission is what lets a
+// caller ask again deliberately instead of assuming it saw everything.
+func (bd *budget) note(b *strings.Builder, unit string) {
+	if bd.dropped == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n[%d %s omitted for space — ask again with a larger charBudget]\n",
+		bd.dropped, unit)
+}
 
 // Explore renders ranked retrieval, or an explicit miss.
 func Explore(ix *index.Index, query string, maxNodes, charBudget int) string {
@@ -56,13 +101,84 @@ a module source — or fall back to grep.`,
 		b.WriteString("\n")
 		writeIdentity(&b, h.Node)
 		fmt.Fprintf(&b, "referenced by: %d   references: %d\n", h.RefByCount, h.RefCount)
+		writeInstances(&b, h.Instances)
 		writeExcerpt(&b, h.Node, h.Excerpt)
 	}
 	return b.String()
 }
 
-// ForAddress renders the reverse lookup.
-func ForAddress(ix *index.Index, address string) string {
+// writeInstances reports what the overlay resolved. A block with for_each is one node and
+// any number of instances, and an agent reasoning about cost, blast radius or naming needs
+// the second number — which static HCL cannot supply at all.
+func writeInstances(b *strings.Builder, instances []index.NodeInstance) {
+	if len(instances) == 0 {
+		return
+	}
+
+	byStack := map[string][]index.NodeInstance{}
+	var order []string
+	for _, i := range instances {
+		if _, seen := byStack[i.Stack]; !seen {
+			order = append(order, i.Stack)
+		}
+		byStack[i.Stack] = append(byStack[i.Stack], i)
+	}
+
+	for _, stack := range order {
+		group := byStack[stack]
+		name := stack
+		if name == "" {
+			name = "."
+		}
+		fmt.Fprintf(b, "instances in %s: %d", name, len(group))
+
+		var actions []string
+		for _, i := range group {
+			if s := i.ActionSummary(); s != "" && s != "no-op" {
+				actions = append(actions, s)
+			}
+		}
+		if len(actions) > 0 {
+			fmt.Fprintf(b, "   planned: %s", strings.Join(dedupe(actions), ", "))
+		}
+		b.WriteString("\n")
+
+		// Full addresses, not bare keys. A block inside an expanded module has repeating
+		// keys — `0, 1, 0, 1` for two instances of a module with count = 2 — which is
+		// both useless and actively misleading. The full address is what distinguishes
+		// them, and it is the string a caller pastes into `terraform state show`.
+		var addrs []string
+		for _, i := range group {
+			if i.Address != "" {
+				addrs = append(addrs, i.Address)
+			}
+		}
+		if len(addrs) > 0 {
+			shown := addrs
+			suffix := ""
+			if len(shown) > 8 {
+				shown, suffix = shown[:8], fmt.Sprintf("\n  … %d more", len(addrs)-8)
+			}
+			fmt.Fprintf(b, "  %s%s\n", strings.Join(shown, "\n  "), suffix)
+		}
+	}
+}
+
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ForAddress renders the reverse lookup, bounded by charBudget.
+func ForAddress(ix *index.Index, address string, charBudget int) string {
 	res := ix.ForAddress(address)
 
 	if len(res.Declarations) == 0 {
@@ -78,18 +194,34 @@ exist. Try the bare local name, or the resource type.`, address, ix.NodeCount())
 	b.WriteString("Only resolved expression references are listed. A mention in a comment or " +
 		"inside a quoted string is not a reference and is deliberately absent.\n")
 
-	for _, n := range res.Declarations {
-		b.WriteString("\n")
-		writeIdentity(&b, n)
-
-		writeRefs(&b, "referenced by", res.ReferencedBy[n.Key()], true)
-		writeRefs(&b, "references", res.References[n.Key()], false)
+	// The budget is split across declarations rather than spent first-come. A variable
+	// declared once per stack in a 29-stack repository would otherwise render the first
+	// three in full and silently drop the other twenty-six.
+	bd := newBudget(charBudget)
+	perDeclaration := bd.limit / len(res.Declarations)
+	if perDeclaration < 400 {
+		perDeclaration = 400
 	}
+
+	for _, n := range res.Declarations {
+		var d strings.Builder
+		writeIdentity(&d, n)
+		writeRefsBounded(&d, "referenced by", res.ReferencedBy[n.Key()], true, perDeclaration)
+		writeRefsBounded(&d, "references", res.References[n.Key()], false, perDeclaration)
+
+		if !bd.allow(d.Len() + 1) {
+			continue
+		}
+		b.WriteString("\n")
+		b.WriteString(d.String())
+	}
+
+	bd.note(&b, "declaration(s)")
 	return b.String()
 }
 
-// Impact renders the reachability set, and is explicit about what it is not.
-func Impact(ix *index.Index, address string, dir index.Direction, depth int) string {
+// Impact renders the reachability set, bounded, and explicit about what it is not.
+func Impact(ix *index.Index, address string, dir index.Direction, depth, charBudget int) string {
 	res := ix.Impact(address, dir, depth)
 
 	if len(res.Origin) == 0 {
@@ -123,35 +255,98 @@ func Impact(ix *index.Index, address string, dir index.Direction, depth int) str
 	}
 	sort.Ints(depths)
 
+	// Reserve room for the caveat and the replacement list, which are the parts a caller
+	// most needs. Spending the whole budget on a flat node listing and then truncating the
+	// "what gets destroyed" section would be the worst possible thing to drop.
+	bd := newBudget(charBudget)
+	bd.limit = bd.limit * 3 / 4
+
 	for _, d := range depths {
-		fmt.Fprintf(&b, "\ndepth %d:\n", d)
+		if bd.exhausted() {
+			break
+		}
+		header := fmt.Sprintf("\ndepth %d:\n", d)
+		if !bd.allow(len(header)) {
+			break
+		}
+		b.WriteString(header)
+
 		for _, n := range byDepth[d] {
-			fmt.Fprintf(&b, "  %-44s %s", n.Node.Address, n.Node.Location())
+			var line strings.Builder
+			fmt.Fprintf(&line, "  %-44s %s", n.Node.Address, n.Node.Location())
 			if n.Via != nil && n.Via.Kind != graph.EdgeReferences {
-				fmt.Fprintf(&b, "  [%s]", n.Via.Kind)
+				fmt.Fprintf(&line, "  [%s]", n.Via.Kind)
 			}
-			b.WriteString("\n")
+			// Marked inline as well as summarised below, because a reader scanning the
+			// list should not have to cross-reference to find the destructive entries.
+			if n.Replaces() {
+				line.WriteString("  ** REPLACED **")
+			} else if c := len(n.Instances); c > 1 {
+				fmt.Fprintf(&line, "  (%d instances)", c)
+			}
+			line.WriteString("\n")
+
+			if !bd.allow(line.Len()) {
+				continue
+			}
+			b.WriteString(line.String())
 		}
 	}
+	bd.note(&b, "node(s)")
 
-	// The honest caveat, stated every time rather than buried in documentation.
-	b.WriteString("\nThis is what is *connected*, not what a plan would replace. Static " +
-		"configuration knows\nwhich expressions read which addresses; only `terraform plan` " +
-		"knows which changes force\nreplacement.\n")
+	writeImpactCaveat(&b, res)
 
-	if len(res.ExpandingBlocks) > 0 {
-		fmt.Fprintf(&b, "\nLower bound: %d block(s) in this set use count or for_each, so the real\n"+
-			"instance count is higher than the node count: %s\n",
-			len(res.ExpandingBlocks), strings.Join(res.ExpandingBlocks, ", "))
-	}
 	if res.Truncated {
 		fmt.Fprintf(&b, "\nTruncated at depth %d — there is more beyond it. Ask again with a larger depth.\n", depth)
 	}
 	return b.String()
 }
 
-// Modules renders the module inventory, skew first.
-func Modules(ix *index.Index, filter string) string {
+// writeImpactCaveat states exactly how much this answer knows.
+//
+// The three cases are genuinely different and collapsing them would be dishonest in one
+// direction or the other. Without an overlay the set is connectivity and a lower bound. A
+// state overlay makes the instance count real but still cannot see a future change. Only a
+// plan can say what gets replaced — and when it can, it should say so plainly instead of
+// repeating a disclaimer it has outgrown.
+func writeImpactCaveat(b *strings.Builder, res index.ImpactResult) {
+	switch {
+	case res.OverlayKind == overlay.KindPlan:
+		fmt.Fprintf(b, "\nResolved against a plan: %d real instance(s) across this set.\n",
+			res.InstanceTotal)
+		if len(res.Replacing) > 0 {
+			fmt.Fprintf(b, "\nDESTROYED AND RECREATED by this plan (%d):\n", len(res.Replacing))
+			for _, a := range res.Replacing {
+				fmt.Fprintf(b, "  %s\n", a)
+			}
+		} else {
+			b.WriteString("Nothing in this set is replaced by the current plan; " +
+				"changes are in-place updates.\n")
+		}
+		b.WriteString("\nThe plan is a snapshot. Re-plan after editing configuration or this " +
+			"answer goes stale.\n")
+
+	case res.OverlayKind == overlay.KindState:
+		fmt.Fprintf(b, "\nResolved against state: %d real instance(s) across this set.\n",
+			res.InstanceTotal)
+		b.WriteString("State knows what exists, not what a change would do. For " +
+			"replace-vs-update, supply a\nplan file rather than a state file.\n")
+
+	default:
+		b.WriteString("\nThis is what is *connected*, not what a plan would replace. Static " +
+			"configuration knows\nwhich expressions read which addresses; only `terraform plan` " +
+			"knows which changes force\nreplacement. Supply one with --plan to resolve this.\n")
+
+		if len(res.ExpandingBlocks) > 0 {
+			fmt.Fprintf(b, "\nLower bound: %d block(s) in this set use count or for_each, so the real\n"+
+				"instance count is higher than the node count: %s\n",
+				len(res.ExpandingBlocks), strings.Join(res.ExpandingBlocks, ", "))
+		}
+	}
+}
+
+// Modules renders the module inventory, skew first, bounded by charBudget.
+func Modules(ix *index.Index, filter string, charBudget int) string {
 	usages := ix.Modules(filter)
 
 	if len(usages) == 0 {
@@ -170,15 +365,20 @@ func Modules(ix *index.Index, filter string) string {
 	}
 	fmt.Fprintf(&b, "%d module source(s); %d pinned at more than one version.\n", len(usages), skewed)
 
+	// Sources are already ordered skew-first, so a budget that runs out drops the healthy
+	// ones — which is the right thing to lose.
+	bd := newBudget(charBudget)
+
 	for _, u := range usages {
-		b.WriteString("\n")
-		fmt.Fprintf(&b, "%s", u.Source)
+		var s strings.Builder
+		s.WriteString("\n")
+		fmt.Fprintf(&s, "%s", u.Source)
 		if u.Local {
-			b.WriteString("  (local path — no version to skew)")
+			s.WriteString("  (local path — no version to skew)")
 		} else if len(u.Versions) > 1 {
-			b.WriteString("  ← VERSION SKEW")
+			s.WriteString("  ← VERSION SKEW")
 		}
-		b.WriteString("\n")
+		s.WriteString("\n")
 
 		versions := make([]string, 0, len(u.Versions))
 		for v := range u.Versions {
@@ -188,23 +388,40 @@ func Modules(ix *index.Index, filter string) string {
 
 		for _, v := range versions {
 			sites := u.Versions[v]
-			fmt.Fprintf(&b, "  %-12s %d call site(s)\n", v, len(sites))
-			for _, s := range sites {
+			fmt.Fprintf(&s, "  %-12s %d call site(s)\n", v, len(sites))
+
+			// Call sites repeat heavily in a large repository. The count above is the
+			// answer; the individual sites are detail, so only the first few are named.
+			shown := sites
+			if len(shown) > 4 {
+				shown = shown[:4]
+			}
+			for _, site := range shown {
 				// The calling directory is the answer to "which stack", which is what the
 				// question is actually about — the call's own address repeats across them.
-				stack := s.Call.Stack
+				stack := site.Call.Stack
 				if stack == "" {
-					stack = s.Call.ModuleDir
+					stack = site.Call.ModuleDir
 				}
-				fmt.Fprintf(&b, "    %-24s in %-18s %s\n", s.Call.Address, stack, s.Call.Location())
+				fmt.Fprintf(&s, "    %-24s in %-18s %s\n", site.Call.Address, stack, site.Call.Location())
+			}
+			if len(sites) > len(shown) {
+				fmt.Fprintf(&s, "    … %d more call site(s)\n", len(sites)-len(shown))
 			}
 		}
+
+		if !bd.allow(s.Len()) {
+			continue
+		}
+		b.WriteString(s.String())
 	}
+
+	bd.note(&b, "module source(s)")
 	return b.String()
 }
 
-// Orphans renders dead configuration.
-func Orphans(ix *index.Index) string {
+// Orphans renders dead configuration, bounded by charBudget.
+func Orphans(ix *index.Index, charBudget int) string {
 	orphans := ix.Orphans()
 	if len(orphans) == 0 {
 		return "No unreferenced variables, locals or child-module outputs. " +
@@ -216,18 +433,28 @@ func Orphans(ix *index.Index) string {
 	b.WriteString("A caller passing a value does not count as using it: a variable every stack wires\n" +
 		"up and nothing inside ever reads is dead configuration with live call sites.\n")
 
+	bd := newBudget(charBudget)
 	current := "\x00"
+
 	for _, o := range orphans {
+		var s strings.Builder
 		if o.Node.ModuleDir != current {
-			current = o.Node.ModuleDir
-			dir := current
+			dir := o.Node.ModuleDir
 			if dir == "" {
 				dir = "."
 			}
-			fmt.Fprintf(&b, "\n%s\n", dir)
+			fmt.Fprintf(&s, "\n%s\n", dir)
 		}
-		fmt.Fprintf(&b, "  %-34s %-22s %s\n", o.Node.Address, o.Node.Location(), o.Reason)
+		fmt.Fprintf(&s, "  %-34s %-22s %s\n", o.Node.Address, o.Node.Location(), o.Reason)
+
+		if !bd.allow(s.Len()) {
+			continue
+		}
+		current = o.Node.ModuleDir
+		b.WriteString(s.String())
 	}
+
+	bd.note(&b, "orphan(s)")
 	return b.String()
 }
 
@@ -262,11 +489,7 @@ func Status(ix *index.Index, repoRoot string, builds int) string {
 			u, g.EdgeCount())
 	}
 
-	// The overlay is not built yet. Saying so is more useful than silence, because an
-	// agent asking about replacement behaviour needs to know the answer cannot come from
-	// here.
-	b.WriteString("\nplan overlay: not loaded (static HCL only).\n" +
-		"count/for_each expansion and replace-vs-update are therefore not available.\n")
+	writeOverlayStatus(&b, ix)
 
 	if len(g.ParseErrors) > 0 {
 		fmt.Fprintf(&b, "\nparse errors (%d):\n", len(g.ParseErrors))
@@ -275,6 +498,55 @@ func Status(ix *index.Index, repoRoot string, builds int) string {
 		}
 	}
 	return b.String()
+}
+
+// writeOverlayStatus says what the overlay can and cannot answer.
+//
+// An agent that asks about replacement and gets silence will assume the answer is "no
+// replacement". Naming the absence, per stack, is the difference between a limit and a
+// wrong answer.
+func writeOverlayStatus(b *strings.Builder, ix *index.Index) {
+	ov := ix.Overlay()
+
+	if !ov.IsAvailable() {
+		fmt.Fprintf(b, "\nplan overlay: not loaded — %s.\n", ov.UnavailableReason())
+		b.WriteString("Static HCL only: count/for_each expansion and replace-vs-update are not\n" +
+			"available. Produce one with:\n" +
+			"  terraform plan -out=tf.plan && terraform show -json tf.plan > tfplan.json\n" +
+			"left in the root module directory, or pass --plan <root>=<path>.\n")
+		return
+	}
+
+	b.WriteString("\nplan overlay:\n")
+	covered := map[string]bool{}
+	for _, stack := range ov.Stacks() {
+		covered[stack] = true
+		name := stack
+		if name == "" {
+			name = "."
+		}
+		fmt.Fprintf(b, "  %-24s %-6s %s\n", name, ov.KindFor(stack), ov.SourceFor(stack))
+	}
+
+	// A partly covered repository is the dangerous state: the tool looks equipped, and is
+	// silently blind on whichever stack the question happens to be about.
+	var uncovered []string
+	for _, r := range ix.Graph().Roots {
+		if !covered[r] {
+			name := r
+			if name == "" {
+				name = "."
+			}
+			uncovered = append(uncovered, name)
+		}
+	}
+	if len(uncovered) > 0 {
+		fmt.Fprintf(b, "  no overlay for %d root(s): %s\n", len(uncovered), strings.Join(uncovered, ", "))
+		b.WriteString("  answers about those stacks are static-only.\n")
+	}
+	if reason := ov.UnavailableReason(); reason != "" {
+		fmt.Fprintf(b, "  warning: %s\n", reason)
+	}
 }
 
 func writeIdentity(b *strings.Builder, n *graph.Node) {
@@ -286,10 +558,11 @@ func writeIdentity(b *strings.Builder, n *graph.Node) {
 		scope = "."
 	}
 	fmt.Fprintf(b, "module: %s", scope)
-	if n.Stack != "" && n.Stack != n.ModuleDir {
-		fmt.Fprintf(b, "   stack: %s", n.Stack)
-	} else if n.Stack == "" && n.Kind != graph.KindModuleSource && n.Kind != graph.KindStack {
+	switch {
+	case n.Shared:
 		b.WriteString("   stack: (shared by several roots)")
+	case n.Stack != "" && n.Stack != n.ModuleDir:
+		fmt.Fprintf(b, "   stack: %s", n.Stack)
 	}
 	b.WriteString("\n")
 
@@ -338,18 +611,23 @@ func writeExcerpt(b *strings.Builder, n *graph.Node, e index.Excerpt) {
 	}
 }
 
-func writeRefs(b *strings.Builder, label string, refs []index.Reference, incoming bool) {
+// writeRefsBounded lists references within a character allowance, always stating the true
+// total first so a truncated list is never mistaken for a complete one.
+func writeRefsBounded(b *strings.Builder, label string, refs []index.Reference, incoming bool, allowance int) {
 	if len(refs) == 0 {
 		fmt.Fprintf(b, "%s: none\n", label)
 		return
 	}
 
 	fmt.Fprintf(b, "%s (%d):\n", label, len(refs))
+
+	spent := 0
 	for i, r := range refs {
-		if i >= refCap {
-			fmt.Fprintf(b, "  … %d more.\n", len(refs)-refCap)
-			break
+		if i >= refCap || spent >= allowance {
+			fmt.Fprintf(b, "  … %d more.\n", len(refs)-i)
+			return
 		}
+		before := b.Len()
 
 		peer := "(unresolved)"
 		if r.Peer != nil {
@@ -366,6 +644,7 @@ func writeRefs(b *strings.Builder, label string, refs []index.Reference, incomin
 			fmt.Fprintf(b, "  as %s", r.Edge.Traversal)
 		}
 		b.WriteString("\n")
+		spent += b.Len() - before
 	}
 }
 

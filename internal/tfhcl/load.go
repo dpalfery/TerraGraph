@@ -52,7 +52,68 @@ func Load(repoRoot string) (*graph.Graph, error) {
 	l.resolveAll()
 
 	graph.SortNodes(l.nodes)
-	return graph.Build(layout.RepoRoot, layout.Roots, l.nodes, l.edges, l.parseErrors), nil
+	return graph.Build(
+		layout.RepoRoot, layout.Roots, l.nodes, l.edges, l.computePaths(), l.parseErrors), nil
+}
+
+// maxModulePathDepth bounds the module-path walk.
+//
+// Terraform rejects a module cycle, but TerraGraph reads configuration that may not be
+// valid — that is much of the point of reading it statically. A cycle produces paths that
+// grow without bound rather than repeating, so a visited-set alone does not terminate.
+const maxModulePathDepth = 32
+
+// computePaths works out every way each module directory is reached from a root.
+//
+// The result is what lets a node keyed by directory be looked up in a plan keyed by module
+// path. A directory called from three stacks gets three paths, which is not redundancy: the
+// same block really does have separate instances under each caller.
+func (l *loader) computePaths() map[string][]graph.StackPath {
+	type call struct{ name, target string }
+
+	callsFrom := map[string][]call{}
+	for _, n := range l.nodes {
+		if n.Kind != graph.KindModuleCall || n.Source == "" {
+			continue
+		}
+		if target, ok := l.layout.ResolveLocalSource(n.ModuleDir, n.Source); ok {
+			callsFrom[n.ModuleDir] = append(callsFrom[n.ModuleDir], call{n.Name, target})
+		}
+	}
+
+	paths := map[string][]graph.StackPath{}
+
+	for _, root := range l.layout.Roots {
+		type item struct {
+			dir, prefix string
+			depth       int
+		}
+		queue := []item{{dir: root}}
+		seen := map[string]bool{}
+
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+
+			key := cur.dir + "|" + cur.prefix
+			if seen[key] || cur.depth > maxModulePathDepth {
+				continue
+			}
+			seen[key] = true
+
+			paths[cur.dir] = append(paths[cur.dir],
+				graph.StackPath{Stack: root, ModuleAddress: cur.prefix})
+
+			for _, c := range callsFrom[cur.dir] {
+				next := "module." + c.name
+				if cur.prefix != "" {
+					next = cur.prefix + "." + next
+				}
+				queue = append(queue, item{dir: c.target, prefix: next, depth: cur.depth + 1})
+			}
+		}
+	}
+	return paths
 }
 
 type loader struct {
@@ -244,14 +305,16 @@ func (l *loader) add(n *graph.Node, dir, file string, body *hclsyntax.Body) {
 // assignStacks attributes each node to the root module that owns it, once roots are known.
 func (l *loader) assignStacks() {
 	stackByDir := make(map[string]string, len(l.layout.Dirs))
+	sharedByDir := make(map[string]bool, len(l.layout.Dirs))
 	for _, dir := range l.layout.Dirs {
 		if HasTfvars(l.layout.RepoRoot, dir) {
 			l.explicit[dir] = true
 		}
-		stackByDir[dir] = l.layout.OwningStack(dir, l.callers)
+		stackByDir[dir], sharedByDir[dir] = l.layout.OwningStack(dir, l.callers)
 	}
 	for _, n := range l.nodes {
 		n.Stack = stackByDir[n.ModuleDir]
+		n.Shared = sharedByDir[n.ModuleDir]
 	}
 }
 

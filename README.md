@@ -28,6 +28,11 @@ resource "aws_s3_bucket_policy" "logs" {
 `terra_for_address aws_s3_bucket.logs` returns the one real dependency, because a reference
 here is a resolved HCL traversal — a comment and a quoted ARN produce nothing.
 
+Measured against Google's [terraform-example-foundation](https://github.com/terraform-google-modules/terraform-example-foundation)
+(265 files, 29 root modules): **81% fewer tokens across ten questions, cheaper on 9 of 10,
+and correct on 10 of 10 where grep manages 3.** Method, full results and the caveats are in
+[docs/token-benchmark.md](docs/token-benchmark.md).
+
 ## Tools
 
 | Tool | Answers |
@@ -42,8 +47,30 @@ here is a resolved HCL traversal — a comment and a quoted ARN produce nothing.
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/dpalfery/TerraGraph/main/install.sh | sh
+```
+
+Installs both binaries to `/usr/local/bin` if writable, otherwise `~/.local/bin`. The
+script verifies every download against the release's published SHA-256 and refuses to
+install on a mismatch.
+
+Pin a version, or choose where it lands:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dpalfery/TerraGraph/main/install.sh | \
+  TERRAGRAPH_VERSION=v0.0.1 TERRAGRAPH_INSTALL_DIR="$HOME/bin" sh
+```
+
+If you would rather not pipe a script into a shell — a reasonable instinct — download
+[`install.sh`](install.sh) and read it first, grab a tarball straight from
+[Releases](https://github.com/dpalfery/TerraGraph/releases), or build from source:
+
+```bash
+git clone https://github.com/dpalfery/TerraGraph && cd TerraGraph
 go build -o terragraph ./cmd/terragraph && go build -o terragraph-mcp ./cmd/terragraph-mcp
 ```
+
+Windows binaries are attached to each release; the installer covers macOS and Linux only.
 
 Register the MCP server against a repository:
 
@@ -130,18 +157,71 @@ Nothing is dropped silently. The response says whether a node was cut for budget
 irrelevance, since only the former makes asking again worthwhile, and a truncated block names
 its exact line range so the caller can open precisely that instead of the whole file.
 
+## The plan overlay
+
+Static HCL cannot say how many instances a `for_each` block becomes, or whether a change
+replaces a resource or updates it. An optional overlay reads `terraform show -json` and
+answers both:
+
+```bash
+terraform plan -out=tf.plan && terraform show -json tf.plan > tfplan.json
+```
+
+Leave that file in the root module directory and it is picked up automatically — or pass
+`--plan <root>=<path>`. A state file (`terraform show -json > state.json`) works too, and
+resolves instances but not replacements; a plan wins when both are present.
+
+With an overlay, `terra_impact` stops hedging:
+
+```
+DESTROYED AND RECREATED by this plan (1):
+  terraform_data.single
+```
+
+and `terra_explore` resolves expansion to real, paste-able addresses:
+
+```
+instances in .: 4   planned: create
+  module.fleet["eu"].terraform_data.inner[0]
+  module.fleet["eu"].terraform_data.inner[1]
+  module.fleet["us"].terraform_data.inner[0]
+  module.fleet["us"].terraform_data.inner[1]
+```
+
+**The overlay is optional in the strong sense.** Without it every tool answers completely,
+only less precisely, and each says which case it is in — `terra_status` names the stacks it
+does *not* cover, because a partly-covered repository is the state where the tool looks
+equipped and is silently blind on whichever stack you asked about.
+
+The host tracks configuration and overlay on separate clocks. A `terraform plan` in an
+active session rewrites the overlay constantly; re-parsing every `.tf` file to pick up an
+instance count would make the expensive half hostage to the cheap one.
+
 ## Limits, stated up front
 
-- **Static HCL only.** `count` and `for_each` are detected but not expanded, so an impact set
-  containing them is a lower bound. `terra_impact` reports what is *connected*, which is not
-  what `terraform plan` would replace — every impact answer says so.
 - **Remote modules are not indexed.** A reference into a registry or git module resolves to
   the module call and stops there. `terra_status` reports how many references this affects.
 - **`.terraform/` is excluded.** It holds verbatim copies of initialised modules, so walking
   it would double-count exactly the call sites `terra_modules` is meant to total.
+- **A plan is a snapshot.** Edit configuration after planning and the overlay is stale.
+  Re-plan; the host notices the file change without re-parsing the repository.
 
-A plan/state overlay addressing the first two is designed for but not built: the seam is
-`index.Host`, which already tracks its inputs separately.
+## Documentation
+
+`docs/` is a governed corpus under [kyber-weave](https://github.com/dpalfery/kyber-weave)'s
+documentation ontology: every document carries typed frontmatter, and `component` and
+`owner` are drawn from a closed vocabulary in [`docs/catalog.md`](docs/catalog.md) rather
+than invented one document at a time.
+
+- [`docs/documentation-ontology.md`](docs/documentation-ontology.md) — the schema every
+  document conforms to
+- [`docs/catalog.md`](docs/catalog.md) — the component and owner vocabulary
+- [`docs/plans/`](docs/plans) — plans, which retrieval deliberately demotes: a plan is a
+  record of intent, not guidance to act on
+
+```bash
+kyber-weave docs validate .
+```
 
 ## Development
 

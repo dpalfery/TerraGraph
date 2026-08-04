@@ -43,14 +43,14 @@ func TestMissIsExplicitAndActionable(t *testing.T) {
 func TestImpactAlwaysStatesItsLimit(t *testing.T) {
 	ix := build(t)
 	for _, addr := range []string{"var.environment", "aws_s3_bucket.logs", "local.common_tags"} {
-		out := Impact(ix, addr, index.Dependents, 3)
+		out := Impact(ix, addr, index.Dependents, 3, index.DefaultCharBudget)
 		mustContain(t, out, "not what a plan would replace",
 			"every impact answer must disclaim precision it does not have")
 	}
 }
 
 func TestForAddressStatesWhatItExcludes(t *testing.T) {
-	out := ForAddress(build(t), "aws_s3_bucket.logs")
+	out := ForAddress(build(t), "aws_s3_bucket.logs", index.DefaultCharBudget)
 
 	mustContain(t, out, "comment", "the caller must know text mentions were excluded on purpose")
 	mustContain(t, out, "quoted string", "the string-literal exclusion is the non-obvious half")
@@ -75,7 +75,7 @@ func TestTruncationNamesTheLineRange(t *testing.T) {
 }
 
 func TestOrphansExplainsTheWiredDistinction(t *testing.T) {
-	out := Orphans(build(t))
+	out := Orphans(build(t), index.DefaultCharBudget)
 	mustContain(t, out, "does not count as using it",
 		"the wired-but-unread distinction is the whole finding")
 }
@@ -90,7 +90,7 @@ func TestStatusDeclaresTheOverlayIsAbsent(t *testing.T) {
 }
 
 func TestModulesFlagsSkew(t *testing.T) {
-	out := Modules(build(t), "")
+	out := Modules(build(t), "", index.DefaultCharBudget)
 	mustContain(t, out, "VERSION SKEW", "skew is the finding and must be visible, not inferred")
 	mustContain(t, out, "local path", "a local source cannot skew and should say so")
 }
@@ -109,6 +109,63 @@ func TestBudgetIsRespected(t *testing.T) {
 	}
 }
 
+// TestEveryToolIsBounded is the regression for the defect the token benchmark found.
+//
+// Only Explore was ever budgeted. On a 29-stack repository, terra_for_address on a
+// variable declared once per stack returned 3,814 tokens where the grep it replaces cost
+// 1,438 — a retrieval tool costing more than the search it exists to avoid. Every tool now
+// takes a budget, and each must actually honour it.
+func TestEveryToolIsBounded(t *testing.T) {
+	ix := build(t)
+
+	cases := []struct {
+		name string
+		fn   func(budget int) string
+	}{
+		{"Explore", func(b int) string { return Explore(ix, "bucket", 20, b) }},
+		{"ForAddress", func(b int) string { return ForAddress(ix, "aws_s3_bucket", b) }},
+		{"Impact", func(b int) string { return Impact(ix, "var.environment", index.Dependents, 5, b) }},
+		{"Modules", func(b int) string { return Modules(ix, "", b) }},
+		{"Orphans", func(b int) string { return Orphans(ix, b) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			small, large := tc.fn(1000), tc.fn(60000)
+
+			if len(small) > len(large) {
+				t.Errorf("a smaller budget produced more output: 1000→%d, 60000→%d",
+					len(small), len(large))
+			}
+
+			// The header, the caveat and the omission note are fixed overhead that must
+			// always be emitted, so the cap is the budget plus a bounded preamble rather
+			// than the budget exactly. What must not happen is output scaling with the
+			// repository instead of with the budget.
+			if len(small) > 4000 {
+				t.Errorf("budget 1000 produced %d characters — the tool is not bounded",
+					len(small))
+			}
+		})
+	}
+}
+
+// TestTruncatedListsStateTheirTrueTotal is what makes a bounded answer safe. A caller
+// shown three of twenty-five declarations must be told there are twenty-five, or it will
+// reason from a partial list as though it were complete.
+func TestTruncatedListsStateTheirTrueTotal(t *testing.T) {
+	ix := build(t)
+
+	out := ForAddress(ix, "aws_s3_bucket", 600)
+	mustContain(t, out, "declaration(s)", "the true declaration count must survive truncation")
+
+	orphans := Orphans(ix, 600)
+	mustContain(t, orphans, "unreferenced declaration(s)", "the true orphan count must survive truncation")
+	if strings.Contains(orphans, "omitted for space") {
+		mustContain(t, orphans, "larger charBudget", "an omission must say how to get the rest")
+	}
+}
+
 func TestEmptyQueryDoesNotPanic(t *testing.T) {
 	ix := build(t)
 	for _, q := range []string{"", "   ", "\n"} {
@@ -116,10 +173,10 @@ func TestEmptyQueryDoesNotPanic(t *testing.T) {
 			t.Errorf("empty query %q produced empty output rather than a stated miss", q)
 		}
 	}
-	if out := ForAddress(ix, ""); out == "" {
+	if out := ForAddress(ix, "", index.DefaultCharBudget); out == "" {
 		t.Error("empty address produced empty output")
 	}
-	if out := Impact(ix, "", index.Dependents, 3); out == "" {
+	if out := Impact(ix, "", index.Dependents, 3, index.DefaultCharBudget); out == "" {
 		t.Error("empty impact address produced empty output")
 	}
 }

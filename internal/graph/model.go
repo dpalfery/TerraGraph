@@ -80,9 +80,15 @@ type Node struct {
 	// nowhere else.
 	ModuleDir string
 
-	// Stack is the repo-relative directory of the owning root module, or empty when this
-	// node lives in a shared child module reachable from several roots.
+	// Stack is the repo-relative directory of the owning root module. Empty means either
+	// "no single owner" or "the root module is the repository itself" — Shared is what
+	// tells those apart.
 	Stack string
+
+	// Shared marks a node in a child module called from more than one place, which has no
+	// single owning stack. Without this flag an empty Stack is ambiguous, and a
+	// single-root repository gets reported as sharing everything with nobody.
+	Shared bool
 
 	File    string
 	Line    int
@@ -151,6 +157,32 @@ type Edge struct {
 	Line int
 }
 
+// StackPath is one way a module directory is reachable from a root module.
+//
+// It exists to join two different addressing schemes. TerraGraph keys nodes by directory,
+// because that is the scope HCL resolves references in and it is stable no matter who
+// calls the module. Terraform keys everything by module path from a root, because that is
+// what a plan is produced against. A shared module has one directory and several paths —
+// `modules/bucket` is `module.artifacts_bucket` in one stack and `module.backups_bucket`
+// in another — so the mapping is genuinely one-to-many and cannot be collapsed to a field
+// on the node.
+type StackPath struct {
+	// Stack is the root module directory.
+	Stack string
+
+	// ModuleAddress is the Terraform module path within that root
+	// ("module.a.module.b"), empty for the root module itself.
+	ModuleAddress string
+}
+
+// TerraformAddress renders a node's address as Terraform would write it along this path.
+func (p StackPath) TerraformAddress(nodeAddress string) string {
+	if p.ModuleAddress == "" {
+		return nodeAddress
+	}
+	return p.ModuleAddress + "." + nodeAddress
+}
+
 // Graph is an immutable snapshot of one repository's configuration.
 //
 // Nothing mutates a Graph after Build returns. Staleness is handled by discarding the
@@ -167,6 +199,9 @@ type Graph struct {
 	outgoing map[string][]*Edge
 	incoming map[string][]*Edge
 
+	// pathsByDir maps a module directory to every way a root module reaches it.
+	pathsByDir map[string][]StackPath
+
 	// Roots is every discovered root module, repo-relative.
 	Roots []string
 
@@ -179,7 +214,17 @@ type Graph struct {
 }
 
 // Build assembles the lookup tables once. Callers hand over ownership of the slices.
-func Build(repoRoot string, roots []string, nodes []*Node, edges []*Edge, parseErrors []string) *Graph {
+func Build(
+	repoRoot string,
+	roots []string,
+	nodes []*Node,
+	edges []*Edge,
+	pathsByDir map[string][]StackPath,
+	parseErrors []string,
+) *Graph {
+	if pathsByDir == nil {
+		pathsByDir = map[string][]StackPath{}
+	}
 	g := &Graph{
 		nodes:       nodes,
 		edges:       edges,
@@ -189,6 +234,7 @@ func Build(repoRoot string, roots []string, nodes []*Node, edges []*Edge, parseE
 		byType:      make(map[string][]*Node),
 		outgoing:    make(map[string][]*Edge),
 		incoming:    make(map[string][]*Edge),
+		pathsByDir:  pathsByDir,
 		Roots:       roots,
 		RepoRoot:    repoRoot,
 		ParseErrors: parseErrors,
@@ -242,6 +288,11 @@ func (g *Graph) Outgoing(key string) []*Edge { return g.outgoing[key] }
 // Incoming returns the edges arriving at a node: what references it. This is the reverse
 // lookup that justifies an index over grep.
 func (g *Graph) Incoming(key string) []*Edge { return g.incoming[key] }
+
+// PathsFor returns every way a root module reaches this directory. A directory called
+// from three stacks has three paths, and a caller joining to plan data must consider all
+// of them — the same block genuinely has different instances in each stack.
+func (g *Graph) PathsFor(moduleDir string) []StackPath { return g.pathsByDir[moduleDir] }
 
 // CountsByKind is the shape of the graph, for status reporting.
 func (g *Graph) CountsByKind() map[Kind]int {

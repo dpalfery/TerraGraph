@@ -12,6 +12,7 @@ import (
 
 	"github.com/dpalfery/terragraph/internal/index"
 	"github.com/dpalfery/terragraph/internal/render"
+	"github.com/dpalfery/terragraph/internal/version"
 )
 
 const usage = `terragraph — an in-memory Terraform graph
@@ -23,13 +24,25 @@ usage:
   terragraph impact <address>            transitive blast radius
   terragraph modules [filter]            module inventory and version skew
   terragraph orphans                     unreferenced variables, locals, child outputs
+  terragraph version                     print the build identity
 
 common flags:
   --repo DIR        repository to index (default: current directory)
+  --plan SPEC       plan/state overlay: <root>=<path> pairs, comma separated, or a bare
+                    path when the repo has one root. Omit to auto-discover
+                    *.tfplan.json / plan.json in each root module directory.
+
+  Produce one with:
+    terraform plan -out=tf.plan && terraform show -json tf.plan > tfplan.json
+  The overlay resolves count/for_each into real instances and turns impact answers from
+  "what is connected" into "what gets replaced". Everything works without it.
+
+  --budget N        total characters of output. Defaults to 12000 for explore (which
+                    returns source) and 4000 for the relationship commands (which return
+                    lists that already state their true totals).
 
 explore flags:
   --max N           maximum nodes to return (default 5)
-  --budget N        total characters of configuration across all results (default 12000)
 
 impact flags:
   --direction D     "dependents" (default) or "dependencies"
@@ -58,6 +71,8 @@ func main() {
 		code = runModules(args)
 	case "orphans":
 		code = runOrphans(args)
+	case "version", "--version", "-v":
+		fmt.Println("terragraph", version.String())
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -91,15 +106,38 @@ func parseInterspersed(fs *flag.FlagSet, args []string) []string {
 // open parses the shared flags and builds the index. Every command needs exactly this.
 func open(fs *flag.FlagSet, args []string) (*index.Index, string, []string, int) {
 	repo := fs.String("repo", ".", "repository to index")
+	plan := fs.String("plan", "", "overlay: <root>=<path> pairs, comma separated, or a bare path")
+	budget := fs.Int("budget", 0, "total characters of output; 0 uses the command default")
 	positional := parseInterspersed(fs, args)
 
-	host := index.NewHost(*repo)
+	host := index.NewHost(*repo).WithPlan(*plan)
 	ix, err := host.Current()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "terragraph: %v\n", err)
 		return nil, "", nil, 1
 	}
+
+	// A malformed --plan degrades to no overlay, which would look like "no plan found".
+	// Saying so is the difference between a typo and a silently wrong answer.
+	if perr := host.ExplicitPlanError(); perr != nil {
+		fmt.Fprintf(os.Stderr, "terragraph: --plan ignored: %v\n", perr)
+	}
+	sharedBudget = *budget
 	return ix, host.RepoRoot(), positional, 0
+}
+
+// sharedBudget is the --budget flag, read by every command. Every tool is bounded, not
+// just retrieval: a reverse lookup on a variable declared in twenty-nine stacks was the
+// single most expensive answer the benchmark measured.
+var sharedBudget int
+
+// budgetOr applies a command's own default when --budget was not given. Retrieval and the
+// relationship tools have different defaults because their output has a different shape.
+func budgetOr(def int) int {
+	if sharedBudget > 0 {
+		return sharedBudget
+	}
+	return def
 }
 
 func runStatus(args []string) int {
@@ -115,7 +153,6 @@ func runStatus(args []string) int {
 func runExplore(args []string) int {
 	fs := flag.NewFlagSet("explore", flag.ExitOnError)
 	max := fs.Int("max", 5, "maximum nodes to return")
-	budget := fs.Int("budget", index.DefaultCharBudget, "total characters across all results")
 
 	ix, _, rest, code := open(fs, args)
 	if code != 0 {
@@ -125,7 +162,7 @@ func runExplore(args []string) int {
 		fmt.Fprintln(os.Stderr, "terragraph explore: need a query")
 		return 2
 	}
-	fmt.Print(render.Explore(ix, joinArgs(rest), *max, *budget))
+	fmt.Print(render.Explore(ix, joinArgs(rest), *max, budgetOr(index.DefaultCharBudget)))
 	return 0
 }
 
@@ -139,7 +176,7 @@ func runRefs(args []string) int {
 		fmt.Fprintln(os.Stderr, "terragraph refs: need an address")
 		return 2
 	}
-	fmt.Print(render.ForAddress(ix, rest[0]))
+	fmt.Print(render.ForAddress(ix, rest[0], budgetOr(index.DefaultListBudget)))
 	return 0
 }
 
@@ -161,7 +198,7 @@ func runImpact(args []string) int {
 	if *dir == string(index.Dependencies) {
 		d = index.Dependencies
 	}
-	fmt.Print(render.Impact(ix, rest[0], d, *depth))
+	fmt.Print(render.Impact(ix, rest[0], d, *depth, budgetOr(index.DefaultListBudget)))
 	return 0
 }
 
@@ -175,7 +212,7 @@ func runModules(args []string) int {
 	if len(rest) > 0 {
 		filter = rest[0]
 	}
-	fmt.Print(render.Modules(ix, filter))
+	fmt.Print(render.Modules(ix, filter, budgetOr(index.DefaultListBudget)))
 	return 0
 }
 
@@ -185,7 +222,7 @@ func runOrphans(args []string) int {
 	if code != 0 {
 		return code
 	}
-	fmt.Print(render.Orphans(ix))
+	fmt.Print(render.Orphans(ix, budgetOr(index.DefaultListBudget)))
 	return 0
 }
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/dpalfery/terragraph/internal/graph"
+	"github.com/dpalfery/terragraph/internal/overlay"
 )
 
 // Reference is one edge presented from the perspective of the node being asked about.
@@ -103,6 +104,19 @@ type ImpactNode struct {
 	// Via is the edge that first reached this node, so a caller can see the chain rather
 	// than a flat list.
 	Via *graph.Edge
+
+	// Instances is the overlay's answer for this node, empty without one.
+	Instances []NodeInstance
+}
+
+// Replaces reports whether any instance of this node is destroyed and recreated.
+func (n ImpactNode) Replaces() bool {
+	for _, i := range n.Instances {
+		if i.Replaces() {
+			return true
+		}
+	}
+	return false
 }
 
 // ImpactResult is a reachability set, and an honest statement of what it is not.
@@ -113,10 +127,25 @@ type ImpactResult struct {
 	// Truncated says the walk hit the depth limit with frontier left over.
 	Truncated bool
 
-	// ExpandingBlocks names nodes in the set that use count or for_each. Static parsing
-	// cannot say how many instances those become, so an impact set containing them is a
+	// ExpandingBlocks names nodes in the set that use count or for_each. Without an
+	// overlay, static parsing cannot say how many instances those become, so the set is a
 	// lower bound on the real one.
 	ExpandingBlocks []string
+
+	// OverlayAvailable says whether the counts below came from a plan or a state rather
+	// than from guessing.
+	OverlayAvailable bool
+
+	// OverlayKind is what the overlay can answer: a plan knows replacement, a state does
+	// not. Reporting "no replacements" from a state overlay would be a lie of omission.
+	OverlayKind overlay.Kind
+
+	// InstanceTotal is how many real instances the set covers, when an overlay is loaded.
+	InstanceTotal int
+
+	// Replacing names the nodes a plan intends to destroy and recreate. This is the
+	// question static configuration cannot answer at all.
+	Replacing []string
 }
 
 // Impact walks the reference graph transitively.
@@ -167,7 +196,9 @@ func (ix *Index) Impact(address string, dir Direction, maxDepth int) ImpactResul
 					continue
 				}
 				visited[peerKey] = true
-				res.Nodes = append(res.Nodes, ImpactNode{Node: peer, Depth: depth, Via: e})
+				res.Nodes = append(res.Nodes, ImpactNode{
+					Node: peer, Depth: depth, Via: e, Instances: ix.InstancesOf(peer),
+				})
 				next = append(next, peer)
 			}
 		}
@@ -175,12 +206,37 @@ func (ix *Index) Impact(address string, dir Direction, maxDepth int) ImpactResul
 	}
 	res.Truncated = len(frontier) > 0
 
-	for _, in := range res.Nodes {
+	res.OverlayAvailable = ix.overlay.IsAvailable()
+
+	// The origin is part of the blast radius too: changing a resource replaces that
+	// resource. Leaving it out of the replacement list was the obvious thing to get wrong.
+	scan := make([]ImpactNode, 0, len(res.Nodes)+len(res.Origin))
+	for _, o := range res.Origin {
+		scan = append(scan, ImpactNode{Node: o, Instances: ix.InstancesOf(o)})
+	}
+	scan = append(scan, res.Nodes...)
+
+	seenReplacing := map[string]bool{}
+	for _, in := range scan {
 		if in.Node.HasCount || in.Node.HasForEach {
 			res.ExpandingBlocks = append(res.ExpandingBlocks, in.Node.Address)
 		}
+		res.InstanceTotal += len(in.Instances)
+
+		if in.Replaces() && !seenReplacing[in.Node.Key()] {
+			seenReplacing[in.Node.Key()] = true
+			res.Replacing = append(res.Replacing, in.Node.Address)
+		}
+		for _, i := range in.Instances {
+			if res.OverlayKind == "" {
+				res.OverlayKind = ix.overlay.KindFor(i.Stack)
+			}
+		}
 	}
+
 	sort.Strings(res.ExpandingBlocks)
+	res.ExpandingBlocks = dedupeStrings(res.ExpandingBlocks)
+	sort.Strings(res.Replacing)
 
 	sort.SliceStable(res.Nodes, func(i, j int) bool {
 		if res.Nodes[i].Depth != res.Nodes[j].Depth {
@@ -327,6 +383,19 @@ func (ix *Index) Orphans() []Orphan {
 		}
 		return out[i].Node.Address < out[j].Node.Address
 	})
+	return out
+}
+
+func dedupeStrings(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	out := in[:1]
+	for _, s := range in[1:] {
+		if s != out[len(out)-1] {
+			out = append(out, s)
+		}
+	}
 	return out
 }
 

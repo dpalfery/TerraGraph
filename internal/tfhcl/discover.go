@@ -173,26 +173,33 @@ func (l *Layout) ComputeRoots(explicit map[string]bool) {
 	sort.Strings(l.Roots)
 }
 
-// OwningStack returns the root module a directory belongs to. A root owns itself. A child
-// module called from exactly one root belongs to that root; one shared between several
-// roots belongs to none, because claiming an arbitrary owner would make stack-scoped
-// answers quietly wrong.
-func (l *Layout) OwningStack(dir string, callers map[string][]string) string {
+// OwningStack returns the root module a directory belongs to, and whether it is shared.
+//
+// A root owns itself. A child module called from exactly one place belongs to that caller;
+// one called from several belongs to none, because claiming an arbitrary owner would make
+// every stack-scoped answer about it quietly wrong.
+//
+// The second return value is not redundant with an empty first one. A repository whose
+// root module is the repository itself has the legitimate stack name "", so "no owner" and
+// "owned by the top-level directory" are the same string and only the flag tells them
+// apart.
+func (l *Layout) OwningStack(dir string, callers map[string][]string) (stack string, shared bool) {
 	for _, r := range l.Roots {
 		if r == dir {
-			return dir
+			return dir, false
 		}
 	}
+
 	seen := map[string]bool{}
 	for _, c := range callers[dir] {
 		seen[c] = true
 	}
 	if len(seen) == 1 {
 		for c := range seen {
-			return c
+			return c, false
 		}
 	}
-	return ""
+	return "", len(seen) > 1
 }
 
 // HasTfvars reports whether a directory carries .tfvars files, a positive root signal.
