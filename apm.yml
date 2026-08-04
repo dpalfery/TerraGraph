@@ -1,0 +1,10 @@
+name: TerraGraph
+version: 1.0.0
+description: APM project for TerraGraph
+author: dpalfery
+dependencies:
+  apm:
+  - dpalfery/kyber-weave
+  mcp: []
+includes: auto
+scripts: {}

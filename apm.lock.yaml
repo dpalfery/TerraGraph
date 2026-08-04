@@ -1,0 +1,18 @@
+lockfile_version: '1'
+generated_at: '2026-08-04T01:47:59.359242+00:00'
+apm_version: 0.21.0
+dependencies:
+- repo_url: dpalfery/kyber-weave
+  host: github.com
+  resolved_commit: 2dcedaec47ffa45b716d22d894e4eb99b5de5388
+  package_type: apm_package
+  deployed_files:
+  - .agents/skills/kyber-weave-docs
+  - .agents/skills/kyber-weave-docs/SKILL.md
+  - .agents/skills/kyber-weave-docs/references/retrofit.md
+  - .agents/skills/kyber-weave-docs/references/rules.md
+  deployed_file_hashes:
+    .agents/skills/kyber-weave-docs/SKILL.md: sha256:cced5d29a981ae0ccad0fedeae65341f3fd8aa40f9fb7c2bf11ddbe05130dde7
+    .agents/skills/kyber-weave-docs/references/retrofit.md: sha256:3ed9743b1904cc0b2ec53114d4b7e8df670dae2e6c417c962d05b641c57f7c3e
+    .agents/skills/kyber-weave-docs/references/rules.md: sha256:deaf0746fd318e522c5c753fb78d646748460fa4f1b68571af0ffa291b971efc
+  content_hash: sha256:d133d953c1fe0717b35c7c031d316c1ea07f1004529c514a1d276cf868e664db

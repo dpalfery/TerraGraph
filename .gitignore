@@ -15,3 +15,7 @@ crash.log
 .DS_Store
 .idea/
 .vscode/
+
+
+# APM dependencies
+apm_modules/

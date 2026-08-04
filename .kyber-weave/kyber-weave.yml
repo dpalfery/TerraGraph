@@ -1,0 +1,8 @@
+# Kyber-Weave host configuration. Every ontology default is overridable here.
+# Reference: docs/documentation-ontology.md
+ontology:
+  docs-root: 'docs'
+
+  # Product defaults exclude five DevOps paths from the repository the ontology
+  # was first built for. An empty list clears them.
+  excluded-files: []
