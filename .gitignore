@@ -1,0 +1,17 @@
+# Build output
+/terragraph
+/terragraph-mcp
+/dist/
+
+# Terraform working state — never indexed, never committed
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
