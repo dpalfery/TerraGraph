@@ -44,6 +44,9 @@ and correct on 10 of 10 where grep manages 3.** Method, full results and the cav
 | `terra_orphans` | variables, locals and child-module outputs nothing consumes |
 | `terra_status` | index shape, coverage gaps, and how far to trust the rest |
 
+Add them to your agent with [`terragraph init`](#add-it-to-your-project) — one command,
+seven supported tools.
+
 ## Install
 
 ```bash
@@ -72,7 +75,53 @@ go build -o terragraph ./cmd/terragraph && go build -o terragraph-mcp ./cmd/terr
 
 Windows binaries are attached to each release; the installer covers macOS and Linux only.
 
-Register the MCP server against a repository:
+## Add it to your project
+
+From your Terraform repository:
+
+```bash
+terragraph init --tool claude
+```
+
+That writes the MCP server registration into the right project-scoped config file for your
+agent, merging into whatever is already there. Commit the file and your whole team gets the
+tools.
+
+| `--tool` | Agent | File it writes |
+|---|---|---|
+| `claude` | Claude Code | `.mcp.json` |
+| `copilot` | GitHub Copilot (VS Code) | `.vscode/mcp.json` |
+| `copilot-cli` | GitHub Copilot CLI | `.github/mcp.json` |
+| `cursor` | Cursor | `.cursor/mcp.json` |
+| `opencode` | OpenCode | `opencode.json` |
+| `kilo` | Kilo | `kilo.jsonc` |
+| `codex` | OpenAI Codex CLI | `.codex/config.toml` |
+
+Repeat or comma-separate the flag for several agents, use `--all` for every one, or omit it
+entirely to configure whatever the project already shows signs of using:
+
+```bash
+terragraph init --tool cursor,copilot
+terragraph init --dry-run --all      # print the resulting config, write nothing
+terragraph init --list               # every tool, its file, and its root key
+```
+
+Re-running is safe: an entry that is already correct is reported and left alone, and nothing
+else in the file is touched — other servers, `$schema`, editor settings and inputs all
+survive. If a file cannot be rewritten safely (a JSONC file with comments, where re-encoding
+would delete them) `init` refuses and prints the snippet to paste instead.
+
+**Two things worth knowing**, because both fail silently otherwise:
+
+- **GitHub Copilot has two separate surfaces.** The VS Code extension reads
+  `.vscode/mcp.json` under a `servers` key; the CLI reads `.github/mcp.json` under
+  `mcpServers`. Neither reads the other's file. Run both `--tool copilot` and
+  `--tool copilot-cli` if you use both.
+- **Codex ignores project-local config for untrusted projects.** `init` writes
+  `.codex/config.toml` correctly and it will do nothing until you mark the project trusted
+  in `~/.codex/config.toml`. The command prints the exact block to add.
+
+To wire it up by hand instead, or for an agent not listed above:
 
 ```bash
 claude mcp add terragraph -- /absolute/path/to/terragraph-mcp --repo /absolute/path/to/your/infra
