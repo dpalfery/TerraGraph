@@ -24,6 +24,7 @@ usage:
   terragraph impact <address>            transitive blast radius
   terragraph modules [filter]            module inventory and version skew
   terragraph orphans                     unreferenced variables, locals, child outputs
+  terragraph init [--tool NAME]          register the MCP server in this project's agent config
   terragraph version                     print the build identity
 
 common flags:
@@ -47,6 +48,13 @@ explore flags:
 impact flags:
   --direction D     "dependents" (default) or "dependencies"
   --depth N         how many hops to walk (default 3)
+
+init flags:
+  --tool NAME       claude, copilot, copilot-cli, cursor, opencode, kilo, codex
+                    repeatable, or comma-separated. Omit to autodetect.
+  --all             configure every supported tool
+  --list            show every tool and the file it writes
+  --dry-run         print the resulting config without writing it
 `
 
 func main() {
@@ -71,6 +79,8 @@ func main() {
 		code = runModules(args)
 	case "orphans":
 		code = runOrphans(args)
+	case "init":
+		code = runInit(args)
 	case "version", "--version", "-v":
 		fmt.Println("terragraph", version.String())
 	case "-h", "--help", "help":
