@@ -98,13 +98,22 @@ func captureFD(t *testing.T, fd **os.File, fn func()) string {
 		t.Fatal(err)
 	}
 	*fd = w
-	done := make(chan string)
+	// Buffer the result so a t.Fatalf inside fn (which Goexits after running defers)
+	// cannot leave the reader blocked forever on an unbuffered send.
+	done := make(chan string, 1)
 	go func() {
 		var buf bytes.Buffer
 		_, _ = io.Copy(&buf, r)
+		_ = r.Close()
 		done <- buf.String()
 	}()
-	defer func() { *fd = old }()
+	defer func() {
+		// Close the write end before restoring *fd. If fn calls t.Fatalf, this defer is
+		// what unblocks the reader; without it the pipe stays open and the test hangs
+		// until the suite timeout.
+		_ = w.Close()
+		*fd = old
+	}()
 	fn()
 	_ = w.Close()
 	return <-done
