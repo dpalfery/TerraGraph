@@ -25,12 +25,22 @@ func mergeJSON(existing []byte, container, name string, entry any) (out []byte, 
 		if err := json.Unmarshal(existing, &root); err != nil {
 			return nil, false, fmt.Errorf("not strict JSON (%v)", cleanJSONError(err))
 		}
+		// json.Unmarshal leaves the destination nil for a JSON null. Treat that as an empty
+		// object so a file that is literally `null` does not panic on the first write.
+		if root == nil {
+			root = map[string]json.RawMessage{}
+		}
 	}
 
 	inner := map[string]json.RawMessage{}
 	if raw, ok := root[container]; ok && len(bytes.TrimSpace(raw)) > 0 {
 		if err := json.Unmarshal(raw, &inner); err != nil {
 			return nil, false, fmt.Errorf("%q is not an object", container)
+		}
+		// The same null trap at the container level: {"mcpServers": null} is valid JSON and
+		// a reasonable "clear this key" shape, but assigning into a nil map panics.
+		if inner == nil {
+			inner = map[string]json.RawMessage{}
 		}
 	}
 

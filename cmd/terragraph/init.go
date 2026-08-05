@@ -35,11 +35,26 @@ func runInit(args []string) int {
 	binary := fs.String("binary", "", "path or name of the terragraph-mcp executable")
 	serverRepo := fs.String("server-repo", ".", "--repo value passed to the MCP server")
 
-	_ = parseInterspersed(fs, args)
+	positional := parseInterspersed(fs, args)
+	if len(positional) > 0 {
+		fmt.Fprintf(os.Stderr, `terragraph init: unexpected arguments: %s
+
+init does not take positional tool names. Use flags instead:
+  terragraph init --tool claude
+  terragraph init --tool copilot --tool cursor
+  terragraph init --all
+`, strings.Join(positional, " "))
+		return 2
+	}
 
 	if *list {
 		printTargets()
 		return 0
+	}
+
+	if *all && len(tools) > 0 {
+		fmt.Fprintf(os.Stderr, "terragraph init: --all and --tool cannot be used together\n")
+		return 2
 	}
 
 	root, err := filepath.Abs(*repo)
@@ -93,6 +108,7 @@ func selectTargets(tools stringList, all bool, root string) ([]mcpinit.Target, i
 
 	case len(tools) > 0:
 		var out []mcpinit.Target
+		seen := map[string]bool{}
 		for _, name := range tools {
 			t, ok := mcpinit.Lookup(name)
 			if !ok {
@@ -100,6 +116,10 @@ func selectTargets(tools stringList, all bool, root string) ([]mcpinit.Target, i
 					name, strings.Join(mcpinit.IDs(), ", "))
 				return nil, 2
 			}
+			if seen[t.ID] {
+				continue
+			}
+			seen[t.ID] = true
 			out = append(out, t)
 		}
 		return out, 0

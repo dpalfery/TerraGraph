@@ -238,6 +238,49 @@ func TestMergeRefusesJSONC(t *testing.T) {
 	}
 }
 
+// TestMergeJSONNullContainer treats {"mcpServers": null} as an empty object rather than
+// panicking on assignment into the nil map json.Unmarshal produces for JSON null.
+func TestMergeJSONNullContainer(t *testing.T) {
+	existing := []byte(`{"mcpServers": null}`)
+	out, changed, err := mergeJSON(existing, "mcpServers", "terragraph",
+		stdioEntry{Command: "terragraph-mcp", Args: []string{"--repo", "."}})
+	if err != nil {
+		t.Fatalf("merge with null container: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected a write when the container was null")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	servers, ok := doc["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers is %T, want object", doc["mcpServers"])
+	}
+	if _, ok := servers["terragraph"]; !ok {
+		t.Fatal("terragraph was not written into a formerly-null container")
+	}
+}
+
+func TestMergeJSONNullDocument(t *testing.T) {
+	out, changed, err := mergeJSON([]byte("null"), "mcpServers", "terragraph",
+		stdioEntry{Command: "terragraph-mcp"})
+	if err != nil {
+		t.Fatalf("merge with null document: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected a write when the document was null")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if _, ok := doc["mcpServers"]; !ok {
+		t.Fatal("mcpServers missing after merging into a null document")
+	}
+}
+
 func TestMergeTOMLAppendsAndReplaces(t *testing.T) {
 	base := []byte(`model = "gpt-5-codex"
 
