@@ -454,8 +454,38 @@ func jsonString(s string) string {
 }
 
 // tomlString quotes a basic TOML string. Paths on Windows contain backslashes, which are
-// escapes in a TOML basic string and would otherwise corrupt the command.
+// escapes in a TOML basic string and would otherwise corrupt the command. Control characters
+// (including CR) are also forbidden unescaped, so a "paste this verbatim" snippet has to
+// encode the whole U+0000–U+001F / U+007F range — not just the four escapes that Windows
+// paths usually hit.
 func tomlString(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`)
-	return `"` + r.Replace(s) + `"`
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }

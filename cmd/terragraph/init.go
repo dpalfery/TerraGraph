@@ -162,7 +162,9 @@ func printNotes(changes []mcpinit.Change, root string) {
 	}
 
 	for _, c := range changes {
-		if c.Target.Note == "" || c.Action == mcpinit.ActionManual {
+		// Caveats belong to an actual write. Lecturing about Codex trust or Copilot's two
+		// surfaces after "already registered" is noise — the user already made that choice.
+		if c.Target.Note == "" || c.Action == mcpinit.ActionManual || c.Action == mcpinit.ActionSkip {
 			continue
 		}
 		fmt.Printf("\n  %s:\n    %s\n", c.Target.Display, c.Target.NoteFor(root))

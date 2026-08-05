@@ -144,6 +144,13 @@ func TestNoteForEscapesPathsIntoTheirFormat(t *testing.T) {
 		}
 	}
 
+	// Control characters are rarer than backslashes but equally fatal in a TOML basic string.
+	// A "paste this" snippet that embeds an unescaped CR is not pasteable.
+	ctrl := codex.NoteFor("proj\rwith\x01ctrl")
+	if !strings.Contains(ctrl, `[projects."proj\rwith\u0001ctrl"]`) {
+		t.Errorf("control characters were not escaped for TOML:\n%s", ctrl)
+	}
+
 	// The quoting belongs to NoteFor, so a template carrying its own quotes would double them.
 	if strings.Contains(codex.Note, `"%s"`) {
 		t.Error("the note template quotes the path itself; NoteFor already does")
@@ -564,5 +571,37 @@ func TestDetectFindsConfiguredTools(t *testing.T) {
 	}
 	if len(Detected(t.TempDir())) != 0 {
 		t.Error("an empty directory should detect nothing")
+	}
+}
+
+// TestDetectDoesNotTreatVSCodeAsCopilot is the false-positive that made autodetect untrustworthy:
+// most repositories keep editor settings in .vscode and have never installed Copilot.
+func TestDetectDoesNotTreatVSCodeAsCopilot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".vscode"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".vscode", "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range Detected(dir) {
+		if f.ID == "copilot" {
+			t.Fatal("a bare .vscode directory must not autodetect Copilot; require --tool copilot or .vscode/mcp.json")
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, ".vscode", "mcp.json"), []byte(`{"servers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found := Detected(dir)
+	var saw bool
+	for _, f := range found {
+		if f.ID == "copilot" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("an existing .vscode/mcp.json should detect Copilot")
 	}
 }

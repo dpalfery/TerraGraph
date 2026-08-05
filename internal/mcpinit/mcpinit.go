@@ -2,9 +2,11 @@
 //
 // There is no shared standard here, only a family resemblance. Six tools use five different
 // file locations, three different root keys, two different shapes for "a command with
-// arguments", and one of them is TOML. Writing that by hand is exactly the kind of fiddly,
-// easy-to-get-silently-wrong task worth automating: a config in the wrong file does not
-// error, it just means the agent never sees the tools and nobody knows why.
+// arguments", and one of them is TOML. Targets() returns seven --tool values because GitHub
+// Copilot has two surfaces that do not share a config file; they are one product, not two.
+// Writing that by hand is exactly the kind of fiddly, easy-to-get-silently-wrong task worth
+// automating: a config in the wrong file does not error, it just means the agent never sees
+// the tools and nobody knows why.
 package mcpinit
 
 import (
@@ -105,7 +107,9 @@ func Targets() []Target {
 			Display: "GitHub Copilot (VS Code)",
 			Paths:   []string{".vscode/mcp.json"},
 			Format:  FormatJSON, Container: "servers",
-			Detect: []string{".vscode"},
+			// A .vscode directory is not evidence of Copilot — most repos keep editor
+			// settings there. Only an existing MCP config suggests this surface is in use.
+			Detect: []string{".vscode/mcp.json"},
 			Docs:   "https://code.visualstudio.com/docs/agent-customization/mcp-servers",
 			// The editor uses "servers", not "mcpServers", and wants an explicit
 			// transport type. A file written in the common shape is silently ignored.
