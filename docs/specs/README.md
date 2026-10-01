@@ -4,7 +4,7 @@ title: Specification index
 doc-type: index
 status: draft
 owner: dpalfery
-last-reviewed: 2026-09-29
+last-reviewed: 2026-09-30
 ---
 
 # Specification index
@@ -19,4 +19,4 @@ Completed specifications move to `docs/specs/archive/<feature>/`. The archive is
 
 | Feature | Phase status | Requirements | Design | Tasks |
 |---|---|---|---|---|
-| [bicep-support](bicep-support/requirements.md) | Draft | [requirements](bicep-support/requirements.md) | [design](bicep-support/design.md) | [tasks](bicep-support/tasks.md) |
+| [bicep-support](bicep-support/requirements.md) | Approved 2026-09-30 (awaiting final approve-and-execute) | [requirements](bicep-support/requirements.md) | [design](bicep-support/design.md) | [tasks](bicep-support/tasks.md) |
